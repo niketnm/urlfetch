@@ -6,12 +6,47 @@ report of successes and failures.
 
 ## Usage
 
+Pass URLs directly as arguments:
+
 ```bash
-go run main.go
+go run main.go https://go.dev/ https://github.com/niketnm https://www.lipsum.com/
 ```
 
-Downloaded files are written to `downloads/` (git-ignored). Edit the `urls`
-slice in `main.go` to change what gets fetched.
+Or put them in a file, one per line (`#` lines are treated as comments):
+
+```bash
+go run main.go -file urls.txt
+```
+
+You can mix both — args and `-file` are combined.
+
+### Flags
+
+| Flag           | Default      | Description                                  |
+|----------------|--------------|-----------------------------------------------|
+| `-out`         | `downloads`  | Directory to save downloaded files into       |
+| `-timeout`     | `8s`         | Per-request timeout (e.g. `5s`, `500ms`)      |
+| `-file`        | (none)       | Path to a text file with one URL per line     |
+| `-concurrency` | `0`          | Max concurrent fetches (`0` = unlimited)      |
+
+Example with everything:
+
+```bash
+go run main.go -out results -timeout 5s -concurrency 3 -file urls.txt
+```
+
+See all flags: `go run main.go -h`
+
+Downloaded files are written to the output dir (git-ignored by default).
+The program exits with a non-zero status if any URL failed — useful for
+scripting or CI.
+
+### Building a binary
+
+```bash
+go build -o urlfetch .
+./urlfetch https://go.dev/
+```
 
 ## What it demonstrates
 

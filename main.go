@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,27 +23,43 @@ type result struct {
 	Err      error
 }
 
-// urls to fetch — edit this list, or later swap it for reading from a file/flag.
-var urls = []string{
-	"https://www.lipsum.com/",
-	"https://github.com/niketnm",
-	"https://go.dev/",
-	"https://this-domain-does-not-exist-12345.com/", // intentionally broken, to show error handling
-}
-
-const (
-	outputDir     = "downloads"
-	perRequestTTL = 8 * time.Second
-)
-
 func main() {
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		fmt.Println("failed to create output dir:", err)
+	// Flags
+	outDir := flag.String("out", "downloads", "directory to save downloaded files into")
+	timeout := flag.Duration("timeout", 8*time.Second, "per-request timeout, e.g. 5s, 500ms")
+	urlFile := flag.String("file", "", "path to a text file with one URL per line (optional)")
+	concurrency := flag.Int("concurrency", 0, "max concurrent fetches (0 = unlimited)")
+
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage:\n  %s [flags] <url1> <url2> ...\n  %s [flags] -file urls.txt\n\nFlags:\n", os.Args[0], os.Args[0])
+		flag.PrintDefaults()
+	}
+	flag.Parse()
+
+	urls, err := collectURLs(*urlFile, flag.Args())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+	if len(urls) == 0 {
+		fmt.Fprintln(os.Stderr, "error: no URLs provided (pass them as args or use -file)")
+		flag.Usage()
+		os.Exit(1)
+	}
+
+	if err := os.MkdirAll(*outDir, 0755); err != nil {
+		fmt.Fprintln(os.Stderr, "failed to create output dir:", err)
 		os.Exit(1)
 	}
 
 	var wg sync.WaitGroup
 	results := make([]result, len(urls))
+
+	// Optional concurrency limiter: a buffered channel used as a semaphore.
+	var sem chan struct{}
+	if *concurrency > 0 {
+		sem = make(chan struct{}, *concurrency)
+	}
 
 	start := time.Now()
 
@@ -49,18 +67,57 @@ func main() {
 		wg.Add(1)
 		go func(i int, u string) {
 			defer wg.Done()
-			results[i] = fetchAndSave(u)
+			if sem != nil {
+				sem <- struct{}{}        // acquire slot
+				defer func() { <-sem }() // release slot
+			}
+			results[i] = fetchAndSave(u, *outDir, *timeout)
 		}(i, u)
 	}
 
 	wg.Wait()
 
 	printSummary(results, time.Since(start))
+
+	// Exit with non-zero status if anything failed — useful for scripting/CI.
+	for _, r := range results {
+		if r.Err != nil {
+			os.Exit(1)
+		}
+	}
+}
+
+// collectURLs merges URLs passed as positional args with URLs read from a
+// file (one per line, blank lines and lines starting with # are skipped).
+func collectURLs(filePath string, args []string) ([]string, error) {
+	urls := append([]string{}, args...)
+
+	if filePath != "" {
+		f, err := os.Open(filePath)
+		if err != nil {
+			return nil, fmt.Errorf("reading -file: %w", err)
+		}
+		defer f.Close()
+
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			urls = append(urls, line)
+		}
+		if err := scanner.Err(); err != nil {
+			return nil, fmt.Errorf("scanning -file: %w", err)
+		}
+	}
+
+	return urls, nil
 }
 
 // fetchAndSave downloads one URL with a timeout and writes the body to a file.
-func fetchAndSave(rawURL string) result {
-	ctx, cancel := context.WithTimeout(context.Background(), perRequestTTL)
+func fetchAndSave(rawURL string, outDir string, timeout time.Duration) result {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
@@ -81,7 +138,7 @@ func fetchAndSave(rawURL string) result {
 		return result{URL: rawURL, Err: fmt.Errorf("bad status: %s", resp.Status), Duration: time.Since(start)}
 	}
 
-	path := filepath.Join(outputDir, filenameFor(rawURL))
+	path := filepath.Join(outDir, filenameFor(rawURL))
 	out, err := os.Create(path)
 	if err != nil {
 		return result{URL: rawURL, Err: err, Duration: time.Since(start)}
